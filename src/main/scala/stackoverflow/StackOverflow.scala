@@ -1,9 +1,12 @@
 package stackoverflow
 
+import java.io.PrintWriter
+
 import org.apache.spark.SparkConf
 import org.apache.spark.SparkContext
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
+
 import annotation.tailrec
 import scala.reflect.ClassTag
 
@@ -20,12 +23,12 @@ object StackOverflow extends StackOverflow {
   /** Main function */
   def main(args: Array[String]): Unit = {
 
-    val lines   = sc.textFile("src/main/resources/stackoverflow/stackoverflow.csv")
-    val raw     = rawPostings(lines)
-    val grouped = groupedPostings(raw)
+    val lines: RDD[String] = sc.textFile("src/main/resources/stackoverflow/stackoverflow.csv")
+    val raw: RDD[Question] = rawPostings(lines)
+    val grouped: RDD[(QID, Iterable[(Question, Answer)])] = groupedPostings(raw)
     val scored  = scoredPostings(grouped)
     val vectors = vectorPostings(scored)
-//    assert(vectors.count() == 2121822, "Incorrect number of vectors: " + vectors.count())
+    assert(vectors.count() == 2121822, "Incorrect number of vectors: " + vectors.count())
 
     val means   = kmeans(sampleVectors(vectors), vectors, debug = true)
     val results = clusterResults(means, vectors)
@@ -78,7 +81,11 @@ class StackOverflow extends Serializable {
 
   /** Group the questions and answers together */
   def groupedPostings(postings: RDD[Posting]): RDD[(QID, Iterable[(Question, Answer)])] = {
-    ???
+    val questions: RDD[(QID, Question)] = postings.filter(_.postingType == 1).map(question => (question.id, question))
+    val answers: RDD[(QID, Answer)] = postings.filter(_.postingType == 2).map(answer => (answer.parentId.get, answer))
+
+    val joined: RDD[(QID, (Question, Answer))] = questions join answers
+    joined.groupByKey
   }
 
 
@@ -97,7 +104,15 @@ class StackOverflow extends Serializable {
       highScore
     }
 
-    ???
+    val groupedByQuestion: RDD[(Question, Iterable[Answer])] =
+      grouped
+        .flatMap(x => x._2)
+        .groupByKey
+
+    val pairedWithHighscore: RDD[(Question, HighScore)] = groupedByQuestion
+      .map(x => (x._1, answerHighScore(x._2.toArray)))
+
+    pairedWithHighscore
   }
 
 
@@ -117,7 +132,13 @@ class StackOverflow extends Serializable {
       }
     }
 
-    ???
+    scored
+      .map(x =>
+        (firstLangInTag(x._1.tags, langs), x._2))
+      .filter(_._1.nonEmpty)
+      .map(x =>
+        (x._1.get*langSpread, x._2)).cache()
+
   }
 
 
@@ -174,7 +195,13 @@ class StackOverflow extends Serializable {
   @tailrec final def kmeans(means: Array[(Int, Int)], vectors: RDD[(Int, Int)], iter: Int = 1, debug: Boolean = false): Array[(Int, Int)] = {
     val newMeans = means.clone() // you need to compute newMeans
 
-    // TODO: Fill in the newMeans array
+    vectors
+      .map(vector => (findClosest(vector, means), vector))
+      .groupByKey
+      .mapValues(averageVectors)
+      .collect().foreach(x => newMeans.update(x._1, x._2))
+
+
     val distance = euclideanDistance(means, newMeans)
 
     if (debug) {
@@ -262,6 +289,14 @@ class StackOverflow extends Serializable {
     ((comp1 / count).toInt, (comp2 / count).toInt)
   }
 
+  def getMedian(iter: Iterable[(Int, Int)]): Int = {
+    val sortedList = iter.toList.sortBy(_._2)
+    val mid = sortedList.length/2
+    if (sortedList.length % 2 == 1) sortedList(mid)._2
+    else {
+      (sortedList(mid-1)._2 + sortedList(mid)._2)/2
+    }
+  }
 
 
 
@@ -275,11 +310,14 @@ class StackOverflow extends Serializable {
     val closestGrouped = closest.groupByKey()
 
     val median = closestGrouped.mapValues { vs =>
-      val langLabel: String   = ??? // most common language in the cluster
-      val langPercent: Double = ??? // percent of the questions in the most common language
-      val clusterSize: Int    = ???
-      val medianScore: Int    = ???
-
+      val langIndex = vs
+        .groupBy(_._1)
+        .maxBy(_._2.size)
+        ._1
+      val langLabel: String = langs(langIndex / langSpread)
+      val clusterSize: Int = vs.size
+      val langPercent: Double = vs.count(v => v._1 == langIndex) * 100d / clusterSize
+      val medianScore: Int = getMedian(vs)
       (langLabel, langPercent, clusterSize, medianScore)
     }
 
